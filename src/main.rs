@@ -23,11 +23,11 @@ async fn access_local_surrealdb() {
         .send_query(
             "
             BEGIN TRANSACTION;
-            CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom;
+            CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_num = $transaction_num;
             UPDATE chain:$origin SET transactions +=1;
-            UPDATE origin:$origin SET transactions +=1, amount +=$amount;
+            UPDATE $origin SET transactions +=1, amount +=$amount;
             UPDATE chain:$destination SET transactions +=1;
-            UPDATE destination:$destination SET transactions +=1, amount +=$amount;
+            UPDATE $destination SET transactions +=1, amount +=$amount;
             INSERT INTO volume (id, date, total_volume, $origin_origin, $destination_destination) 
                 VALUES ($date, $date, $amount, $amount) 
                 ON DUPLICATE KEY UPDATE 
@@ -38,11 +38,12 @@ async fn access_local_surrealdb() {
             "
             .to_owned(), 
             json!({
-                "date": "2022_11_10".to_string(),
-                "origin": "kujira".to_string(),
-                "destination": "axelar".to_string(),
-                "amount": "10000".to_string(),
-                "denom": "SCRT".to_string()
+                "date": "2022_11_10",
+                "origin": "origin:evmos",
+                "destination": "destination:injective",
+                "amount": 7000000.0,
+                "denom": "SCRT",
+                "transaction_num": 2,
             })
         ).await;
 
@@ -137,14 +138,21 @@ async fn test_local_surrealdb() {
     let response = client
         .send_query(
         "
+        BEGIN TRANSACTION;
         CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_num = $transaction_num;
+        UPDATE (SELECT origin FROM $origin) SET num_transactions +=1, volume +=$amount;
+        UPDATE $origin SET transactions +=1;
+        UPDATE (SELECT destination FROM $destination) SET num_transactions +=1, volume +=$amount;
+        UPDATE $destination SET transactions +=1;
+        
+        COMMIT TRANSACTION;
         "
         .to_owned(),
         json!({
             "date": "2022_11_10",
-            "origin": "origin:cosmos_hub",
-            "destination": "destination:osmosis",
-            "amount": 5000000.0,
+            "origin": "chain:axelar",
+            "destination": "chain:osmosis",
+            "amount": 1600000,
             "denom": "SCRT",
             "transaction_num": 1
         })
