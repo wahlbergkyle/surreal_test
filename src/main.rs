@@ -5,6 +5,7 @@ use serde::Deserialize;
 #[tokio::main]
 async fn main() {
     test_local_surrealdb().await;
+    // test_json();
 }
 
 async fn access_local_surrealdb() {
@@ -58,7 +59,7 @@ async fn access_local_surrealdb() {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Transaction {
-    pub amount: u128,
+    pub amount: f64,
     pub date: String,
     pub denom: String,
     pub destination: String, 
@@ -92,13 +93,15 @@ pub struct Transaction {
 // }
 
 
-// fn test_json() {
-//     let query = "CREATE User SET username = $username";
-//     let params = json!({
-//         "username": "Kyle"
-//     });
-//     let json = json!([query, params]);
-//     let result = json.to_string();
+fn test_json() {
+    let query = "CREATE User SET username = $username";
+    let params = json!({
+        "username": "Ky:le"
+    });
+    let json = json!([query, params]);
+    let result = json.to_string();
+    println!("{}", result);
+}
 //     match result.needs_one_or_two() {
 //         Ok((Value::Strand(s), o)) if o.is_none() => {
 //             return match rpc.read().await.query(s).await {
@@ -134,21 +137,21 @@ async fn test_local_surrealdb() {
     let response = client
         .send_query(
         "
-        CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom;
+        CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_num = $transaction_num;
         "
         .to_owned(),
         json!({
             "date": "2022_11_10",
             "origin": "origin:cosmos_hub",
             "destination": "destination:osmosis",
-            "amount": 5000000,
+            "amount": 5000000.0,
             "denom": "SCRT",
             "transaction_num": 1
         })
         ).await;
 
         // Date must be a string
-
+        // THIS ^^^^ WORKED, good job me haha. Having 'record' types (aka the origin:cosmos_hub notation) is allowed, colons can exist inside string values within the json! macro
     // let response = client
     //     .send_query(
     // "
@@ -170,7 +173,10 @@ async fn test_local_surrealdb() {
                             Ok(transaction) => {
                                 println!("{}", transaction.amount)
                             },
-                            Err(err) => println!("Didn't return Transaction formatted response :("),
+                            Err(err) => {
+                                println!("Didn't return Transaction formatted response :(");
+                                println!("{}", err);
+                            }
                         }
                     }
                 },
