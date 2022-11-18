@@ -1,11 +1,21 @@
-use surreal_simple_client::SurrealClient;
+pub mod util;
+use chrono::NaiveDate;
+use util::*;
+use std::vec;
+use std::{str::FromStr, array};
+use std::result::Result;
+use std::error::Error;
+use surreal_simple_client::{SurrealClient, rpc};
 use serde_json::{json, Value};
 use serde::Deserialize;
+use chrono::{offset::Utc, NaiveDateTime};
 
 #[tokio::main]
 async fn main() {
-    test_local_surrealdb().await;
-    // test_json();
+    // get_volumes_by_chain_day("2022_17_11", "stride").await; GOOD
+    // get_chain_aggregate_volumes("stride").await; GOOD
+    get_transaction("2fc679d2-bd95-4e45-9529-401debfa8c34".to_string()).await;
+        // test_json();
 }
 
 async fn access_local_surrealdb() {
@@ -56,17 +66,6 @@ async fn access_local_surrealdb() {
         },
     };
 
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct Transaction {
-    pub amount: f64,
-    pub date: String,
-    pub denom: String,
-    pub destination: String, 
-    pub id: String,
-    pub origin: String,
-    pub transaction_num: u128
 }
 
 // pub struct Array(pub Vec<Value>);
@@ -125,6 +124,267 @@ fn test_json() {
 //     println!("{}", result);
 // }
 
+
+
+async fn post_transaction(origin: &str, destination: &str, amount: f64, denom: &str, price: f64, wallet: &str) {
+    let mut client = get_client().await;
+
+    let o = SupportedChains::from_str(origin).unwrap();
+    let d = SupportedChains::from_str(destination).unwrap();
+    let t = SupportedTokens::from_str(denom).unwrap();
+    
+    // Work can happen here with the identified chains and tokens, if need be.
+
+    let sql_o_vol = sql_chain_token_vol_format(&o, &t);
+    let sql_d_vol = sql_chain_token_vol_format(&d, &t);
+    let sql_o = sql_chain_format(&o);
+    let sql_d = sql_chain_format(&d);
+
+    let date = Utc::now().date_naive().to_string(); // Retrieves current day without timezone information
+    // TODO: Need logic for transaction num. Test surrealQL functions, probs
+    let response = client
+    .send_query(
+    "
+    BEGIN TRANSACTION;
+    CREATE transaction SET datetime = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_uuid = rand::uuid(), price = $price;
+    LET $t = (SELECT * FROM transaction WHERE transaction_num = $transaction_num);
+    UPDATE $origin SET outgoing_transactions +=1, transactions = array::union(transactions, $t.id);
+    UPDATE $destination SET incoming_transactions +=1, transactions = array::union(transactions, $t.id);
+    UPDATE $origin_vol SET volume += { date: $date, incoming: 0, outgoing: 0 } WHERE volume[$].date != $date;
+    UPDATE $origin_vol SET volume[$].outgoing += $amount, total_outgoing += $amount WHERE volume[$].date = $date;
+    UPDATE $destination_vol SET volume += { date: $date, incoming: 0, outgoing: 0 } WHERE volume[$].date != $date;
+    UPDATE $destination_vol SET volume[$].incoming += $amount, total_incoming += $amount WHERE volume[$].date = $date;
+    COMMIT TRANSACTION;
+    "
+    .to_owned(),
+    json!({
+        "date": date,
+        "origin": sql_o,
+        "origin_vol": sql_o_vol,
+        "destination": sql_d,
+        "destination_vol": sql_d_vol,
+        "amount": amount,
+        "denom": denom.to_uppercase().as_str(),
+        "price": price
+    })
+    ).await;
+
+    match response {
+        Ok(surreal_resp) => {
+            match surreal_resp.await {
+                Ok(data) => {
+                    if let Some(surreal_query_result) = data.get_nth_query_result(0){
+                        let result = surreal_query_result.results();
+                        match serde_json::from_value::<Transaction>(result[0].clone()){
+                            Ok(transaction) => {
+                                // TODO: Return a positive response? Something similar?
+                            },
+                            Err(err) => {
+                                // Handle error
+                            }
+                        }
+                    }
+                },
+                Err(recv_error) => {
+                    // Handle recv error
+                },
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+        },
+    };
+}
+
+async fn get_transaction(tx_uuid: String) {
+    let mut client = get_client().await;
+
+    let response = client
+    .find_one::<TxResponse>(
+    "
+    SELECT {amount: amount, datetime: datetime, denom: denom, origin: origin, destination: destination, transaction_uuid: transaction_uuid} AS `tx` FROM transaction WHERE transaction_uuid = $id
+    "
+    .to_owned(),
+    json!({
+        "id": tx_uuid
+    })
+    ).await;
+
+    match response {
+        Ok(resp) => {
+            match resp {
+                Some(tx_resp) => {
+                    let tx = tx_resp.tx;
+                    println!("{}", tx.amount)
+                },
+                None => todo!(),
+            }
+        },
+        Err(rpcError) => {
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // match response {
+    //     Ok(surreal_resp) => {
+    //         match surreal_resp.await {
+    //             Ok(data) => {
+    //                 if let Some(surreal_query_result) = data.get_nth_query_result(0){
+    //                     let result = surreal_query_result.results();
+    //                     match serde_json::from_value::<TxResponse>(result[0].clone()){
+    //                         Ok(txResp) => {
+    //                             println!("{}", txResp.tx.uuid)
+    //                         },
+    //                         Err(err) => {
+    //                             println!("{}", err)
+    //                         }
+    //                     }
+    //                 }
+    //             },
+    //             Err(recv_error) => {
+    //                 // Handle recv error
+    //             },
+    //         }
+    //     },
+    //     Err(rpcError) => {
+    //         println!("{}", rpcError)
+    //     },
+    // };
+
+}
+
+async fn get_volumes_by_chain_day(date: &str, chain: &str) {
+    let mut client = get_client().await;
+
+    let mut sql_chain = "".to_string();
+
+    let c = valid_chain(chain);
+    match c {
+        Ok(valid) => {
+            sql_chain = valid.surrealql_format(); // Will be formatted like "stride" rather than "chain:stride", which is important
+        },
+        Err(_) => todo!() // Flesh out error conditions still,
+    }
+    //         SELECT {vol: volume[WHERE date = $date], token: id} AS `daily_vol` FROM $chain;
+
+    let response = client.find_many::<DailyVolumeVecResponse>(
+        "
+        SELECT {vol: volume[WHERE date = $date], token: id} AS `daily_vol` FROM type::table($chain);
+        ".to_owned(),
+        json!({
+            "date": date.to_string(),
+            "chain": sql_chain,
+        })
+    ).await;
+
+    let mut output: Vec<FormattedDailyVolOutput> = vec![];
+
+    // match response {
+    //     Ok(surreal_resp) => {
+    //         match surreal_resp.await {
+    //             Ok(data) => {
+    //                 if let Some(surreal_query_result) = data.get_nth_query_result(0){ // Has time, status, and result at this level
+    //                     let result = surreal_query_result.results(); // Vec of DailiyVolumeVecResponse level
+    //                     for value in result {
+    //                         println!("{}", value.to_string());
+    //                         match serde_json::from_value::<DailyVolumeVecResponse>(value.clone()){
+    //                             Ok(vec_resp) => {
+    //                                 if !vec_resp.daily_vol.vol.is_empty() {
+    //                                     let o = FormattedDailyVolOutput {
+    //                                         token: vec_resp.daily_vol.token,
+    //                                         date: vec_resp.daily_vol.vol[0].date.clone(),
+    //                                         incoming: vec_resp.daily_vol.vol[0].incoming,
+    //                                         outgoing: vec_resp.daily_vol.vol[0].outgoing
+    //                                     };
+    //                                     output.push(o);
+    //                                 }
+    //                             },
+    //                             Err(err) => {
+    //                                 println!("{} err big time", err);
+    //                                 continue;
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             },
+    //             Err(recv_error) => {
+    //                 println!("{} recv err", recv_error)
+    //             },
+    //         }
+    //     },
+    //     Err(rpcError) => {
+    //         println!("{} RPC Error", rpcError)
+    //     },
+    // };
+
+    match response {
+        Ok(resp) => {
+            for vec_resp in resp {
+                if !vec_resp.daily_vol.vol.is_empty() {
+                    let o = FormattedDailyVolOutput {
+                        token: vec_resp.daily_vol.token,
+                        date: vec_resp.daily_vol.vol[0].date.clone(),
+                        incoming: vec_resp.daily_vol.vol[0].incoming,
+                        outgoing: vec_resp.daily_vol.vol[0].outgoing
+                    };
+                    output.push(o);
+                }
+            }
+        },
+        Err(rpcError) => {
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().date)
+}
+
+async fn get_chain_aggregate_volumes(chain: &str) {
+    let mut client = get_client().await;
+
+    let sql_chain;
+
+    match valid_chain(chain){
+        Ok(c) => {
+            sql_chain = c.surrealql_format() // Will be "{chain_name}" formatted
+        },
+        Err(_) => todo!() // Exit execution,
+    }
+
+    let response = client.find_many::<AggregateVolVecResponse>(
+        "
+        SELECT {id: id, total_incoming: total_incoming, total_outgoing: total_outgoing} as `aggregate_vol` FROM type::table($chain);
+        ".to_owned(),
+        json!({
+            "chain": sql_chain,
+        })
+    ).await;
+
+    let mut output: Vec<AggregateVolume> = vec![];
+
+    match response {
+        Ok(resp) => {
+            for vec_resp in resp {
+                let o = AggregateVolume {
+                    id: vec_resp.aggregate_vol.id,
+                    total_incoming: vec_resp.aggregate_vol.total_incoming,
+                    total_outgoing: vec_resp.aggregate_vol.total_outgoing
+                };
+                output.push(o);
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().id);
+    println!("{}", output.pop().unwrap().total_incoming)    
+}
+
 async fn test_local_surrealdb() {
     let mut client = SurrealClient::new("ws://localhost:8000/rpc")
         .await
@@ -139,22 +399,26 @@ async fn test_local_surrealdb() {
         .send_query(
         "
         BEGIN TRANSACTION;
-        CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_num = $transaction_num;
+        CREATE transaction SET date = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_num = $transaction_num, price = $price;
         UPDATE (SELECT origin FROM $origin) SET num_transactions +=1, volume +=$amount;
         UPDATE $origin SET transactions +=1;
         UPDATE (SELECT destination FROM $destination) SET num_transactions +=1, volume +=$amount;
         UPDATE $destination SET transactions +=1;
-        
+        UPDATE $origin_vol SET volume[0].incoming += $amount;
+        UPDATE $destination_vol SET volume[0].outgoing += $amount;
         COMMIT TRANSACTION;
         "
         .to_owned(),
         json!({
             "date": "2022_11_10",
             "origin": "chain:axelar",
+            "origin_vol": "axelar:scrt",
             "destination": "chain:osmosis",
+            "destination_vol": "osmosis:scrt",
             "amount": 1600000,
             "denom": "SCRT",
-            "transaction_num": 1
+            "transaction_num": 1,
+            "price": 5
         })
         ).await;
 
