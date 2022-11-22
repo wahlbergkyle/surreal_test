@@ -66,6 +66,11 @@ pub struct ChainSummary {
     pub incoming_total: f64,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct NumUniqueWallets {
+    pub unique_wallets: u64,
+}
+
 pub enum SupportedChains {
     Akash,
     Axelar,
@@ -178,7 +183,7 @@ impl FromStr for SupportedTokens {
 }
 
 impl SupportedTokens {
-    fn surrealql_format(&self) -> &str {
+    pub fn surrealql_format(&self) -> &str {
         match self {
             SupportedTokens::OSMO => "osmo",
             SupportedTokens::AXL => "axl",

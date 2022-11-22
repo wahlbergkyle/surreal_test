@@ -14,7 +14,13 @@ use chrono::{offset::Utc, NaiveDateTime};
 async fn main() {
     // get_volumes_by_chain_day("2022_17_11", "stride").await; GOOD
     // get_chain_aggregate_volumes("stride").await; GOOD
-    get_transaction("2fc679d2-bd95-4e45-9529-401debfa8c34".to_string()).await;
+    // get_transaction("2fc679d2-bd95-4e45-9529-401debfa8c34".to_string()).await; GOOD
+    // get_previous_x_transactions(None, None).await;
+    // get_previous_transactions_by_chain(None, None, "stride").await;
+    // get_previous_transactions_by_denom(None, None, "SCRT").await;
+    // get_previous_transactions_by_denom_and_chain(None, None, "SCRT", "stride").await;
+    // get_num_unique_wallets().await; GOOD
+    // post_transaction(origin, destination, amount, denom, price, secret_address)
         // test_json();
 }
 
@@ -126,7 +132,7 @@ fn test_json() {
 
 
 
-async fn post_transaction(origin: &str, destination: &str, amount: f64, denom: &str, price: f64, wallet: &str) {
+async fn post_transaction(origin: &str, destination: &str, amount: f64, denom: &str, price: f64, secret_address: &str) {
     let mut client = get_client().await;
 
     let o = SupportedChains::from_str(origin).unwrap();
@@ -146,14 +152,16 @@ async fn post_transaction(origin: &str, destination: &str, amount: f64, denom: &
     .send_query(
     "
     BEGIN TRANSACTION;
-    CREATE transaction SET datetime = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, transaction_uuid = rand::uuid(), price = $price;
-    LET $t = (SELECT * FROM transaction WHERE transaction_num = $transaction_num);
+    LET $uuid = rand::uuid();
+    CREATE transaction SET datetime = $date, origin = $origin, destination = $destination, amount = $amount, denom = $denom, uuid = $uuid, price = $price;
+    LET $t = (SELECT * FROM transaction WHERE transaction_uuid = $uuid);
     UPDATE $origin SET outgoing_transactions +=1, transactions = array::union(transactions, $t.id);
     UPDATE $destination SET incoming_transactions +=1, transactions = array::union(transactions, $t.id);
     UPDATE $origin_vol SET volume += { date: $date, incoming: 0, outgoing: 0 } WHERE volume[$].date != $date;
     UPDATE $origin_vol SET volume[$].outgoing += $amount, total_outgoing += $amount WHERE volume[$].date = $date;
     UPDATE $destination_vol SET volume += { date: $date, incoming: 0, outgoing: 0 } WHERE volume[$].date != $date;
     UPDATE $destination_vol SET volume[$].incoming += $amount, total_incoming += $amount WHERE volume[$].date = $date;
+    INSERT INTO wallet (id, address) VALUES ($address, $address);
     COMMIT TRANSACTION;
     "
     .to_owned(),
@@ -165,7 +173,8 @@ async fn post_transaction(origin: &str, destination: &str, amount: f64, denom: &
         "destination_vol": sql_d_vol,
         "amount": amount,
         "denom": denom.to_uppercase().as_str(),
-        "price": price
+        "price": price,
+        "address": secret_address,
     })
     ).await;
 
@@ -383,6 +392,263 @@ async fn get_chain_aggregate_volumes(chain: &str) {
     // TODO: Return output
     println!("{}", output.pop().unwrap().id);
     println!("{}", output.pop().unwrap().total_incoming)    
+}
+
+async fn get_previous_x_transactions(limit: Option<u32>, start: Option<u32>) {
+    let mut client = get_client().await;
+    // MUST BE RUNNING surrealDB nightly, or a version greater than 1.0.0-beta.8+20220930.c246533
+    let mut default_limit: u32 = 50;
+    let mut default_start: u32 = 0;
+
+    if let Some(l) = limit {
+        default_limit = l;
+    }
+
+    if let Some(s) = start {
+        default_start = s;
+    }
+
+    println!("Querying, also {} and {}", default_limit, default_start);
+    let response = client.find_many::<Transaction>(
+        "
+        SELECT * FROM transaction ORDER BY datetime DESC LIMIT $limit START $start;
+        ".to_owned(),
+        json!({
+            "limit": default_limit,
+            "start": default_start
+        })
+    ).await;
+
+    println!("Queried");
+    let mut output: Vec<Transaction> = vec![];
+
+    println!("Made it");
+    match response {
+        Ok(resp) => {
+            for tx in resp {
+                println!("{}", tx.amount);
+                output.push(tx);
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().amount);
+    println!("{}", output.pop().unwrap().datetime)  
+}
+
+async fn get_previous_transactions_by_chain(limit: Option<u32>, start: Option<u32>, chain: &str) {
+    let mut client = get_client().await;
+    // MUST BE RUNNING surrealDB nightly, or a version greater than 1.0.0-beta.8+20220930.c246533
+    let mut default_limit: u32 = 50;
+    let mut default_start: u32 = 0;
+
+    if let Some(l) = limit {
+        default_limit = l;
+    }
+
+    if let Some(s) = start {
+        default_start = s;
+    }
+
+    // Chain formatting
+    let sql_chain;
+
+    match valid_chain(chain){
+        Ok(c) => {
+            sql_chain = sql_chain_format(&c);
+        },
+        Err(_) => todo!() // Exit execution,
+    }
+
+    println!("Querying, also {} and {}", default_limit, default_start);
+    let response = client.find_many::<Transaction>(
+        "
+        SELECT * FROM transaction WHERE (origin = $chain OR destination = $chain) ORDER BY datetime DESC LIMIT $limit START $start;
+        ".to_owned(),
+        json!({
+            "limit": default_limit,
+            "start": default_start,
+            "chain": chain
+        })
+    ).await;
+
+    println!("Queried");
+    let mut output: Vec<Transaction> = vec![];
+
+    println!("Made it");
+    match response {
+        Ok(resp) => {
+            for tx in resp {
+                println!("{}", tx.amount);
+                output.push(tx);
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().amount);
+    println!("{}", output.pop().unwrap().datetime)  
+}
+
+async fn get_previous_transactions_by_denom(limit: Option<u32>, start: Option<u32>, denom: &str) {
+    let mut client = get_client().await;
+    // MUST BE RUNNING surrealDB nightly, or a version greater than 1.0.0-beta.8+20220930.c246533
+    let mut default_limit: u32 = 50;
+    let mut default_start: u32 = 0;
+
+    if let Some(l) = limit {
+        default_limit = l;
+    }
+
+    if let Some(s) = start {
+        default_start = s;
+    }
+
+    let mut token: String = "".to_string();
+
+    match valid_token(denom) {
+        Ok(t) => {
+            token = t.surrealql_format().to_uppercase();
+        },
+        Err(_) => todo!(),
+    }
+
+    println!("Querying, also {} and {}", default_limit, default_start);
+    let response = client.find_many::<Transaction>(
+        "
+        SELECT * FROM transaction WHERE denom = $token ORDER BY datetime DESC LIMIT $limit START $start;
+        ".to_owned(),
+        json!({
+            "limit": default_limit,
+            "start": default_start,
+            "token": token
+        })
+    ).await;
+
+    println!("Queried");
+    let mut output: Vec<Transaction> = vec![];
+
+    println!("Made it");
+    match response {
+        Ok(resp) => {
+            for tx in resp {
+                println!("{}", tx.amount);
+                output.push(tx);
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().amount);
+    println!("{}", output.pop().unwrap().datetime)  
+}
+
+async fn get_previous_transactions_by_denom_and_chain(limit: Option<u32>, start: Option<u32>, denom: &str, chain: &str) {
+    let mut client = get_client().await;
+    // MUST BE RUNNING surrealDB nightly, or a version greater than 1.0.0-beta.8+20220930.c246533
+    let mut default_limit: u32 = 50;
+    let mut default_start: u32 = 0;
+
+    if let Some(l) = limit {
+        default_limit = l;
+    }
+
+    if let Some(s) = start {
+        default_start = s;
+    }
+
+    let mut token: String = "".to_string();
+
+    match valid_token(denom) {
+        Ok(t) => {
+            token = t.surrealql_format().to_uppercase();
+        },
+        Err(_) => todo!(),
+    }
+
+    // Chain formatting
+    let sql_chain;
+
+    match valid_chain(chain){
+        Ok(c) => {
+            sql_chain = sql_chain_format(&c);
+        },
+        Err(_) => todo!() // Exit execution,
+    }
+
+    println!("Querying, also {} and {}", default_limit, default_start);
+    let response = client.find_many::<Transaction>(
+        "
+        SELECT * FROM transaction WHERE denom = $token AND (origin = $chain OR destination = $chain) ORDER BY datetime DESC LIMIT $limit START $start;
+        ".to_owned(),
+        json!({
+            "limit": default_limit,
+            "start": default_start,
+            "token": token
+        })
+    ).await;
+
+    println!("Queried");
+    let mut output: Vec<Transaction> = vec![];
+
+    println!("Made it");
+    match response {
+        Ok(resp) => {
+            for tx in resp {
+                println!("{}", tx.amount);
+                output.push(tx);
+            }
+        },
+        Err(rpcError) => {
+            // Handle RPC error
+            println!("{} RPC Error", rpcError)
+        },
+    };    
+
+    // TODO: Return output
+    println!("{}", output.pop().unwrap().amount);
+    println!("{}", output.pop().unwrap().datetime)  
+}
+
+async fn get_num_unique_wallets() {
+    let mut client = get_client().await;
+
+    let response = client
+    .find_one::<NumUniqueWallets>(
+    "
+    SELECT count() AS unique_wallets FROM wallets GROUP BY ALL;
+    "
+    .to_owned(),
+    json!({})
+    ).await;
+
+    match response {
+        Ok(resp) => {
+            match resp {
+                Some(wallets_resp) => {
+                    let wallets = wallets_resp.unique_wallets;
+                    println!("{}", wallets)
+                },
+                None => todo!(),
+            }
+        },
+        Err(rpcError) => {
+            println!("{} RPC Error", rpcError)
+        },
+    };    
 }
 
 async fn test_local_surrealdb() {
